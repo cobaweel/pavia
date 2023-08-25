@@ -1,11 +1,28 @@
 #!/usr/bin/env python3 
 
+import os
 from dataclasses import dataclass
 import itertools
 from lxml import etree
 import copy
 import zipfile
 import pathlib
+from pathlib import Path
+
+
+'''
+PITCH, PITCH CLASS, AND TPC AS USED IN MUSESCORE
+
+    Pitch is literally just the frequency of the sound measured in
+    semitones, where 60 is the middle C on a piano and 69 is the A
+    conventionally used for orchestra tuning at 440 Hz. 
+
+    Two pitches have the same "pitch class" if and only if they are a
+    multiple of 12 semitones (1 octave) apart. They have the same TPC
+    ("Tonal Pitch Class") if and only if they have the same name; an A
+    sharp and a B flat have the same pitch class but different TPC.
+ '''
+
 
 TPC_NAMES = ["C♭♭","G♭♭","D♭♭","A♭♭","E♭♭","B♭♭", "F♭","C♭","G♭",
              "D♭","A♭","E♭","B♭","F","C","G","D","A","E","B",
@@ -22,10 +39,17 @@ def scrub(root, path):
         node.getparent().remove(node)
     
 class Transform:
-    def process(self, path, content):
-        return content
+    '''Describes a transformation to be applied to each of the files
+    contained in the .mscz zip archives.'''
 
+    def process(self, path, content):
+        '''Given the name of a file inside the archive and its old contents,
+        return its new contents.'''
+        return content
+    
 class MultiTransform(Transform):
+    '''Perform several transforms sequentially.'''
+    
     def __init__(self):
         self.transforms = []
 
@@ -38,6 +62,9 @@ class MultiTransform(Transform):
         return content
     
 class MscxTransform(Transform):
+    '''A null transform that operates only on the .mscx file. To actually
+    do something, override modify().'''
+    
     def modify(self):
         pass
 
@@ -50,6 +77,8 @@ class MscxTransform(Transform):
         return etree.tostring(self.root, pretty_print=True, xml_declaration=True)
 
 class FixBrackets(MscxTransform):
+    '''Set up bar lines and brackets to go all the way across each system.'''
+    
     def modify(self):
         staff_nodes = self.root.xpath(".//Part/Staff")
         scrub(self.root, ".//Part/Staff/barLineSpan")
@@ -65,29 +94,38 @@ class FixBrackets(MscxTransform):
         
     
 class CopyStaffTransform(MscxTransform):
+    '''Add a copy of a given staff.'''
+    
     def __init__(self, src, tgt):
         self.src = src
         self.tgt = tgt
 
     def modify(self):
         src_node = self.root.xpath(".//Part/Staff")[self.src]
+        assert int(src_node.attrib["id"]) == self.src + 1
+        assert len(self.root.xpath(".//Part/Staff")) == self.tgt
         tgt_node = copy.deepcopy(src_node)
         tgt_node.attrib["id"] = str(self.tgt+1)
         src_node.addnext(tgt_node)
 
         src_node = self.root.xpath(".//Score/Staff")[self.src]
+        assert int(src_node.attrib["id"]) == self.src + 1        
+        assert len(self.root.xpath(".//Score/Staff")) == self.tgt
         tgt_node = copy.deepcopy(src_node)
         tgt_node.attrib["id"] = str(self.tgt+1)
         src_node.addnext(tgt_node)
         
     
 class CopyClefTransform(MscxTransform):
+    '''Copy default clef from one staff to another.'''
+    
     def __init__(self, src, tgt):
         self.src = src
         self.tgt = tgt
         
     def modify(self):    
         src_node = self.root.xpath(".//Part/Staff")[self.src]
+        assert int(src_node.attrib["id"]) == self.src + 1
         tgt_node = self.root.xpath(".//Part/Staff")[self.tgt]
         src_clef = src_node.xpath("defaultClef")[0]
         tgt_clef = copy.deepcopy(src_clef)
@@ -95,6 +133,8 @@ class CopyClefTransform(MscxTransform):
         
 
 class MuteStaffTransform(MscxTransform):
+    '''Mark a given staff as not audible.'''
+    
     def __init__(self, idx):
         self.idx = idx
         
@@ -106,6 +146,8 @@ class MuteStaffTransform(MscxTransform):
             play_node.text = "0"
 
 class HideStaffTransform(MscxTransform):
+    '''Mark a given staff as not visible.'''
+    
     def __init__(self, idx):
         self.idx = idx
         
@@ -116,6 +158,13 @@ class HideStaffTransform(MscxTransform):
         show_node.text = "0"
             
 class Chord:
+    '''Operations on a <Chord> node from the original score (in Pavia
+    notation). If there is a chord type marking (M/m/7/d), the highest
+    note as written is considered the root of a stradella chord of
+    that type. Any other notes are considered bass notes to be passed
+    through unmodified.
+    '''
+    
     def __init__(self, chord_node):
         self.chord_intervals = []
         self.chord_suffix = ""
@@ -164,6 +213,8 @@ class Chord:
 
     @property
     def extra_pitches(self):
+        '''Stradella chord pitches that are not written in Pavia
+        notation.'''
         for chord_interval in self.chord_intervals:
             pitch = (self.root_pitch + chord_interval) % 12
             while pitch <= 50:
@@ -268,47 +319,21 @@ class CondensedTransform(MscxTransform):
                     etree.SubElement(extra_stafftext_node, "offset", attrib={'x':'0', 'y':'3.7'})
                     dummy_rest_node.addprevious(extra_stafftext_node)
 
-class MessageTransform(MscxTransform):
-    def __init__(self, msg):
-        self.msg = msg
-
-    def modify(self):
-        staff_node = self.root.xpath(".//Score/Staff")[0]
-        tbox_node = etree.SubElement(staff_node, "TBox")
-        height_node = etree.SubElement(tbox_node, "height")
-        height_node.text="1"
-        text_node = etree.SubElement(tbox_node, "Text")
-        style_node = etree.SubElement(text_node, "style")
-        style_node.text = "frame"
-        text2_node = etree.SubElement(text_node, "text")
-        text2_node.text = self.msg
-                    
-class Zoop:
-    CONVERTED_PHRASE = "🪗"
-    
-    def __init__(self, path):
-        self.path = pathlib.Path(path)
-
-    @property
-    def is_already_converted(self):
-        return self.path.stem.endswith(self.CONVERTED_PHRASE)
-        
-    def go(self, tag, transform):
-        src_path = self.path
-        dst_path = src_path.with_stem(f"{src_path.stem} - {tag} {self.CONVERTED_PHRASE}")
-        print(f'{src_path} → {dst_path}')
-        src_zip = zipfile.ZipFile(src_path)
-        dst_zip = zipfile.ZipFile(dst_path, 'w')
-        for zip_info in src_zip.infolist():
-            content = src_zip.read(zip_info)
-            content = transform.process(zip_info.filename, content)
-            dst_zip.writestr(zip_info, content)
-
+def zoop(src_path, src_tag, dst_tag, transform):
+    src_path = pathlib.Path(src_path)
+    src_stem = src_path.stem
+    dst_stem = dst_tag + src_stem.removeprefix(src_tag)
+    dst_path = src_path.with_stem(dst_stem)
+    src_zip = zipfile.ZipFile(src_path)
+    dst_zip = zipfile.ZipFile(dst_path, 'w')
+    for zip_info in src_zip.infolist():
+        content = src_zip.read(zip_info)
+        content = transform.process(zip_info.filename, content)
+        dst_zip.writestr(zip_info, content)
+    print(f"\t{dst_path}")
 
 def german():
-    msg = "This score was converted by Pavia into the German style."
     transform = MultiTransform()
-    transform.add(MessageTransform(msg))
     transform.add(CopyStaffTransform(1,2))
     transform.add(CopyClefTransform(1,2))
     transform.add(GermanTransform(2))
@@ -318,10 +343,8 @@ def german():
     transform.add(HideInvisibleTransform())
     return transform
 
-def aaa():
-    msg = "This score was converted by Pavia into annotated AAA style."    
+def american():
     transform = MultiTransform()
-    transform.add(MessageTransform(msg))    
     transform.add(CopyStaffTransform(1,2))
     transform.add(CopyClefTransform(1,2))
     transform.add(SymbolsTransform(1))    
@@ -332,10 +355,8 @@ def aaa():
     transform.add(HideInvisibleTransform())    
     return transform
 
-def condensed():
-    msg = "This score was converted by Pavia into condensed (lead sheet) style."
+def french():
     transform = MultiTransform()
-    transform.add(MessageTransform(msg))    
     transform.add(CopyStaffTransform(1,2))
     transform.add(CopyClefTransform(1,2))
     transform.add(GermanTransform(2))
@@ -346,13 +367,8 @@ def condensed():
     transform.add(HideInvisibleTransform())    
     return transform
 
-wd = pathlib.Path('.')
-for path in wd.glob("music/*.mscz"):
-    zoop = Zoop(path)
-    if not zoop.is_already_converted:
-        zoop.go("German", german())
-        zoop.go("AAA", aaa())
-        zoop.go("Condensed", condensed())
-
-
-
+for path in pathlib.Path('.').glob("(pavia)*.mscz"):
+    print(path)
+    zoop(path, "(pavia)", "(german)", german())
+    zoop(path, "(pavia)", "(american)", american())
+    zoop(path, "(pavia)", "(french)", french())

@@ -1,4 +1,5 @@
 .mscbackup/
+*.autosave
 
 # Created by https://www.toptal.com/developers/gitignore/api/emacs,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=emacs,python
