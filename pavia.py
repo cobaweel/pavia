@@ -159,10 +159,10 @@ class HideStaffTransform(MscxTransform):
             
 class Chord:
     '''Operations on a <Chord> node from the original score (in Pavia
-    notation). If there is a chord type marking (M/m/7/d), the highest
-    note as written is considered the root of a stradella chord of
-    that type. Any other notes are considered bass notes to be passed
-    through unmodified.
+    notation). If there is a chord type marking (M/m/7/d), the highest note as
+    written is considered the root of a stradella chord of that type. Any other
+    notes are considered bass notes to be passed through unmodified. If there is
+    a tenuto marking, all bass notes are treated as counter-bass.
     '''
     
     def __init__(self, chord_node):
@@ -172,7 +172,15 @@ class Chord:
         self.pitch_classes = set()
         self.tpc_by_pitch = {}
         self.marking_nodes = []
+        self.counter_bass = False
 
+        fake_nodes = []
+        for articulation_subtype_node in chord_node.xpath(".//Articulation/subtype"):
+            if articulation_subtype_node.text.startswith("articTenuto"):
+                self.counter_bass = True
+                fake_nodes.append(articulation_subtype_node.getparent())
+        for fake_node in fake_nodes:
+            fake_node.getparent().remove(fake_node)
         for text_node in chord_node.xpath(".//Fingering/text"):
             marking = text_node.text
             if marking in CHORD_INTERVALS_BY_MARKING:
@@ -205,6 +213,8 @@ class Chord:
             name = TPC_NAMES[tpc]
             if self.chord_intervals and pitch == self.root_pitch:
                 name = name.lower() + self.chord_suffix
+            elif self.counter_bass:
+                name = "_" + name
             names.append(name)
         if len(names)>0:
             return ["\n".join(names)]
@@ -238,8 +248,12 @@ class Chord:
             stafftext_node = etree.Element("StaffText")
             placement_node = etree.SubElement(stafftext_node, "placement")
             placement_node.text = "below"
-            text_node = etree.SubElement(stafftext_node, "text")
-            text_node.text = annotation
+            text_node = etree.SubElement(stafftext_node, "text")                
+            if annotation[0] == "_":
+                u_node = etree.SubElement(text_node, "u")
+                u_node.text = annotation[1:]
+            else:
+                text_node.text = annotation
             yield stafftext_node
 
 class Measure:
